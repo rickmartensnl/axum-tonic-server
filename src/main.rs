@@ -6,9 +6,9 @@ use hello_world::{
     HelloReply, HelloRequest,
 };
 use http::{header::CONTENT_TYPE, Request};
-use hyper::{client::Client, Body};
+use reqwest::Client;
 use std::net::SocketAddr;
-use tonic::{transport::Server, Status};
+use tonic::{service::Routes, Status};
 use tower::{make::Shared, steer::Steer, BoxError, ServiceExt};
 
 pub mod hello_world {
@@ -19,16 +19,18 @@ pub mod hello_world {
 async fn main() {
     let http = Router::new()
         .route("/", get(|| async { "Hello, world!" }))
+        .into_service()
         .map_err(BoxError::from)
         .boxed_clone();
 
-    let grpc = Server::builder()
-        .add_service(GreeterServer::new(MyGreeter))
+    let grpc = tower::ServiceBuilder::new()
+        .service(Routes::new(GreeterServer::new(MyGreeter)).prepare())
+        .into_axum_router()
         .into_service()
-        .map_response(|r| r.map(axum::body::boxed))
+        .map_err(BoxError::from)
         .boxed_clone();
 
-    let http_grpc = Steer::new(vec![http, grpc], |req: &Request<Body>, _svcs: &[_]| {
+    let http_grpc = Steer::new(vec![http, grpc], |req: &Request<_>, _svcs: &[_]| {
         if req.headers().get(CONTENT_TYPE).map(|v| v.as_bytes()) != Some(b"application/grpc") {
             0
         } else {
@@ -51,14 +53,10 @@ async fn main() {
     // Test HTTP
     let client = Client::new();
 
-    let response = client
-        .get("http://127.0.0.1:3000/".parse().unwrap())
-        .await
-        .unwrap();
+    let response = client.get("http://127.0.0.1:3000/").send().await.unwrap();
 
     println!("HTTP Response: {:?}", response);
-    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-    let body = String::from_utf8_lossy(&body).into_owned();
+    let body = response.text().await.unwrap();
     println!("HTTP Body: {:?}", body);
 
     // Test gRPC
